@@ -4,12 +4,15 @@ from os import listdir
 from os.path import isfile, join
 import random
 from tqdm import tqdm
+import torch.utils.data.dataloader as dataloader
+from torch.utils.data import ConcatDataset
+import numpy as np
 
 
 path = '/Volumes/KINGSTON/Train_DATA_MATHIS/'
 files = [f for f in listdir(path) if isfile(join(path, f))]
 files = list(map(lambda x: path + x, files))
-print("nombre de fichier trouvé :", len(files))
+print("file count:", len(files))
 
 
 class Segment_Batch():
@@ -24,8 +27,9 @@ class Segment_Batch():
         self.batch_meg = self.batch_meg.to(device)
         self.batch_phoneme = self.batch_phoneme.to(device)
         self.batch_subject = self.batch_subject.to(device)
+        return self
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: tp.Any):
         return self.batch_meg[index]
 
     def size(self):
@@ -33,6 +37,56 @@ class Segment_Batch():
 
     def __len__(self) -> int:
         return self.batch_meg.size(0)
+
+    def cat(self, other_seg_batch):
+        self.batch_meg = torch.cat([self.batch_meg,
+                                   other_seg_batch.batch_meg])
+        self.batch_phoneme = torch.cat([self.batch_phoneme,
+                                       other_seg_batch.batch_phoneme])
+        self.batch_subject = torch.cat([self.batch_subject,
+                                       other_seg_batch.batch_subject])
+        return self
+
+
+class CustomDataset(dataloader.Dataset):
+    def __init__(self, files):
+        self.segment_batch = Segment_Batch(torch.Tensor(),
+                                           torch.Tensor(),
+                                           torch.Tensor())
+        for file in files:
+            segment_batch = torch.load(file)
+            self.segment_batch.cat(segment_batch)
+        del segment_batch
+        self.segment_batch.batch_subject.to(torch.int64)
+
+    def __len__(self):
+        return self.segment_batch.batch_subject.size(0)
+
+    def __getitem__(self, idx):
+        return (self.segment_batch.batch_meg[idx],
+                self.segment_batch.batch_phoneme[idx],
+                self.segment_batch.batch_subject[idx])
+
+
+def chunk_list(lst, m):
+    return np.array_split(lst, (len(lst) + m - 1) // m)
+
+
+def Create_Loader(files: list[str] = files,
+                  batch_size: int = 512,
+                  m: int = 5) -> dataloader.DataLoader:
+    files = chunk_list(files, m=5)
+    dataset = None
+    for chunk in tqdm(files, desc="loading data", leave=False):
+        if dataset is None:
+            dataset = CustomDataset(chunk)
+        else:
+            dataset = ConcatDataset(
+                [dataset, CustomDataset(chunk)]
+            )
+    loader = dataloader.DataLoader(dataset, batch_size=batch_size,
+                                   shuffle=True)
+    return loader
 
 
 def split_indices(lst):

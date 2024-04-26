@@ -6,11 +6,17 @@ import torch.nn.functional as F
 
 
 class SpatialAttention(nn.Module):
-    def __init__(self, spatial_dim: int) -> None:
+    def __init__(self, spatial_dim: int, device='cuda') -> None:
         super(SpatialAttention, self).__init__()
-        self.query = torch.randn(spatial_dim, spatial_dim, requires_grad=True)
-        self.key = torch.randn(spatial_dim, spatial_dim, requires_grad=True)
-        self.gamma = nn.Parameter(torch.zeros(1), requires_grad=True)
+        self.query = torch.randn(
+            spatial_dim, spatial_dim, requires_grad=True
+        ).to(device)
+        self.key = torch.randn(
+            spatial_dim, spatial_dim, requires_grad=True
+        ).to(device)
+        self.gamma = nn.Parameter(
+            torch.zeros(1), requires_grad=True
+        ).to(device)
 
     def forward(self, meg: torch.tensor) -> torch.tensor:
         batch_size, _, _ = meg.size()
@@ -31,24 +37,27 @@ class Subject_Layer(nn.Module):
                  out_channels: int) -> None:
         super(Subject_Layer, self).__init__()
         self.weights = nn.Parameter(
-            torch.randn(n_subjects, in_channels, out_channels)
+            torch.randn(n_subjects, in_channels, out_channels),
+            requires_grad=True
         )
+        self.zero = torch.tensor(0, dtype=torch.int64)
 
     def forward(self, x: torch.tensor,
                 subjects: torch.tensor) -> torch.tensor:
         _, C, D = self.weights.size()
         weights = self.weights.gather(
-            0, subjects.view(-1, 1, 1).expand(-1, C, D)
+            self.zero, subjects.view(-1, 1, 1).expand(-1, C, D).to(torch.int64)
         )
         return torch.einsum("bct,bcd->bdt", x, weights)
 
 
 class LSTM_Layer(nn.Module):
-    def __init__(self, dim: int, seq_len: int, norm: bool = True) -> None:
+    def __init__(self, dim: int, seq_len: int, norm: bool = True,
+                 device='cuda') -> None:
         super(LSTM_Layer, self).__init__()
         self.lstm = nn.LSTM(seq_len, seq_len, 1, batch_first=True)
-        self.hidden = (torch.zeros([1, 1, seq_len]),
-                       torch.zeros([1, 1, seq_len]))
+        self.hidden = (torch.zeros([1, 1, seq_len]).to(device),
+                       torch.zeros([1, 1, seq_len]).to(device))
         self.norm = norm
         if norm:
             self.normo = nn.LayerNorm([dim, seq_len])
@@ -70,14 +79,15 @@ class LSTM_Layer(nn.Module):
 
 class model(nn.Module):
     def __init__(self, spatial_dim: int, temporal_dim: int, n_subjects: int,
-                 num_class: int, dropout: float = 0.2) -> None:
+                 num_class: int, dropout: float = 0.2, device='cuda',
+                 lstm_norm=True) -> None:
         super(model, self).__init__()
-        self.attention_layer = SpatialAttention(spatial_dim)
+        self.attention_layer = SpatialAttention(spatial_dim, device)
         self.subject_layer = Subject_Layer(n_subjects, spatial_dim,
                                            spatial_dim)
-        self.lstm1 = LSTM_Layer(spatial_dim, temporal_dim, True)
-        self.lstm2 = LSTM_Layer(spatial_dim, temporal_dim, True)
-        self.lstm3 = LSTM_Layer(spatial_dim, temporal_dim, True)
+        self.lstm1 = LSTM_Layer(spatial_dim, temporal_dim, lstm_norm, device)
+        self.lstm2 = LSTM_Layer(spatial_dim, temporal_dim, lstm_norm, device)
+        self.lstm3 = LSTM_Layer(spatial_dim, temporal_dim, lstm_norm, device)
         self.classifier = nn.Linear(temporal_dim, num_class)
         self.dropout = nn.Dropout(dropout)
 
