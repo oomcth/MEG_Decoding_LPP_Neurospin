@@ -2,34 +2,23 @@ import torch
 import typing as tp
 from torch import nn
 from dataset import Segment_Batch
-import torch.nn.functional as F
+
+
+@torch.jit.script
+def swiglu(x):
+    return x * torch.sigmoid(x) * (1 + torch.sigmoid(x))
 
 
 class SpatialAttention(nn.Module):
-    def __init__(self, spatial_dim: int, device='cuda') -> None:
+    def __init__(self, device='cuda') -> None:
         super(SpatialAttention, self).__init__()
-        self.query = torch.randn(
-            spatial_dim, spatial_dim, requires_grad=True
-        ).to(device)
-        self.key = torch.randn(
-            spatial_dim, spatial_dim, requires_grad=True
-        ).to(device)
-        self.gamma = nn.Parameter(
-            torch.zeros(1), requires_grad=True
-        ).to(device)
+        self.Ut = torch.tensor(torch.load("/Volumes/KINGSTON/Graph/Udef.pth"),
+                               dtype=torch.float, device=device)
+        self.Ut = self.Ut.T
 
     def forward(self, meg: torch.tensor) -> torch.tensor:
-        batch_size, _, _ = meg.size()
-
-        key = torch.bmm(
-            self.key.expand(batch_size, -1, -1), meg
-        ).permute(0, 2, 1)
-        query = torch.bmm(self.query.expand(batch_size, -1, -1), meg)
-
-        energy = torch.bmm(query, key)
-        attention = F.softmax(energy, dim=2)
-        out = torch.bmm(attention, meg)
-        return self.gamma * out + meg
+        out = torch.bmm(self.Ut.expand(meg.size(0), -1, -1), meg)
+        return out
 
 
 class Subject_Layer(nn.Module):
@@ -56,8 +45,8 @@ class LSTM_Layer(nn.Module):
                  device='cuda') -> None:
         super(LSTM_Layer, self).__init__()
         self.lstm = nn.LSTM(seq_len, seq_len, 1, batch_first=True)
-        self.hidden = (torch.zeros([1, 1, seq_len]).to(device),
-                       torch.zeros([1, 1, seq_len]).to(device))
+        self.hidden = (torch.zeros([1, 1, seq_len], device=device),
+                       torch.zeros([1, 1, seq_len], device=device))
         self.norm = norm
         if norm:
             self.normo = nn.LayerNorm([dim, seq_len])
@@ -82,7 +71,7 @@ class model(nn.Module):
                  num_class: int, dropout: float = 0.2, device='cuda',
                  lstm_norm=True) -> None:
         super(model, self).__init__()
-        self.attention_layer = SpatialAttention(spatial_dim, device)
+        self.attention_layer = SpatialAttention(device)
         self.subject_layer = Subject_Layer(n_subjects, spatial_dim,
                                            spatial_dim)
         self.lstm1 = LSTM_Layer(spatial_dim, temporal_dim, lstm_norm, device)
@@ -90,13 +79,22 @@ class model(nn.Module):
         self.lstm3 = LSTM_Layer(spatial_dim, temporal_dim, lstm_norm, device)
         self.classifier = nn.Linear(temporal_dim, num_class)
         self.dropout = nn.Dropout(dropout)
+        self.params = nn.Parameter(
+            torch.zeros(2, device=device), requires_grad=True
+        )
 
     def forward(self, seg_batch: Segment_Batch):
         x, subjects = seg_batch.batch_meg, seg_batch.batch_subject
         x = self.attention_layer(x)
+        x = self.dropout(x)
         x = self.subject_layer(x, subjects)
+        initial_x = x.clone()
         x = self.lstm1(x)
+        x = (x[0] + self.params[0] * initial_x,
+             x[1])
         x = self.lstm2(*x)
+        x = (x[0] + self.params[1] * initial_x,
+             x[1])
         out, _ = self.lstm3(*x)
-        out = self.dropout(out[:, -1, :])
+        out = swiglu(out[:, -1, :])
         return self.classifier(out)

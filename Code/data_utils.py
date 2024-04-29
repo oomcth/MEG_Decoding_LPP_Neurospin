@@ -14,12 +14,19 @@ import torch.nn.functional as F
 import torch
 from dataset import Segment_Batch
 from intervaltree import IntervalTree
+from scipy.spatial.distance import cdist
+
 from jra_utils import approx_match_samples
 from utils import (
     match_list,
     add_syntax,
     get_code_path,
 )
+
+
+global Decomposition
+Decomposition = None
+
 
 nogo = list(torch.load('nogo.pth'))
 for i in range(len(nogo)):
@@ -48,7 +55,7 @@ nogo += valid
 nogo += test
 
 
-choices = ['<p:>', 'R', 'a', 't', '@', 'i', 's', 'I', 'p', 'k']
+choices = ['<p:>', 'R', 'a', 't', '@', 'i', 's', 'p', 'k']
 
 
 TOL_MISSING_DICT = {
@@ -96,6 +103,24 @@ CHAPTER_PATHS = [
     "ch23-25.wav",
     "ch26-27.wav",
 ]
+
+
+def equilibrate_phonemes(df):
+    phoneme_counts = df['phoneme'].value_counts()
+    max_count = phoneme_counts.max()
+    duplicated_rows = []
+
+    for phoneme, count in phoneme_counts.items():
+        duplications_needed = max_count - count
+
+        phoneme_rows = df[df['phoneme'] == phoneme]
+
+        duplicated = phoneme_rows.sample(n=duplications_needed, replace=True)
+        duplicated_rows.append(duplicated)
+
+    df_balanced = pd.concat([df] + duplicated_rows, ignore_index=True)
+    df_balanced = df_balanced.reset_index(drop=True)
+    return df_balanced
 
 
 def read_raw(subject, run_id, events_return=False):
@@ -369,7 +394,7 @@ dataloc = [get_index(i) for i in range(0, 58*9) if get_index(i) not in nogo]
 
 
 def load(subject, run_id, types=[3012]):
-
+    global Decomposition
     raw, meta, df_phonemes = read_raw(subject, run_id, False)
     channels_to_keep = []
     drop = dropChannel
@@ -377,8 +402,26 @@ def load(subject, run_id, types=[3012]):
     for ch in raw.info['chs']:
         if (ch['coil_type'] in types and (not (ch['ch_name'] in drop))):
             channels_to_keep.append(ch['ch_name'])
+
     raw = raw.pick_channels(channels_to_keep)
     tensor_meg = torch.tensor(raw.get_data())
+    if Decomposition is None:
+        layout = mne.find_layout(raw.info)
+        layout = np.array(
+            [layout.pos[layout.names.index(ch)][:2] for ch in raw.ch_names]
+        )
+        layout[:, 0] = (layout[:, 0] - np.min(layout[:, 0]))
+        layout[:, 0] /= np.max(layout[:, 0])
+        layout[:, 1] = (layout[:, 1] - np.min(layout[:, 1]))
+        layout[:, 1] /= np.max(layout[:, 1])
+
+        distances = cdist(layout, layout)
+        distances = np.max(distances) * np.ones(np.shape(distances))
+        distances -= distances
+        distances -= len(distances) * np.identity(len(distances))
+        print('Computing laplacian cholesky decomposition')
+        _, Decomposition = np.linalg.eigh(distances)
+        torch.save(Decomposition, '/Volumes/KINGSTON/Graph/U.pth')
 
     df_phonemes = df_phonemes.drop(
         df_phonemes[df_phonemes['delta'] > 30 / 100].index
@@ -388,7 +431,7 @@ def load(subject, run_id, types=[3012]):
     del raw
     del meta
 
-    return tensor_meg, df_phonemes.reset_index(drop=True)
+    return tensor_meg, equilibrate_phonemes(df_phonemes.reset_index(drop=True))
 
 
 def generate_samples(subject, types=[3022], off_signal=0.07,
@@ -427,7 +470,7 @@ def generate_samples(subject, types=[3022], off_signal=0.07,
 
 
 def Save_data():
-    for place in dataloc:
+    for place in test:
         subject, run = place
         subject = str(subject)
         if run > 9:
@@ -440,10 +483,11 @@ def Save_data():
                                     off_signal=0.07,
                                     size=100,
                                     train_ids=run)
-            torch.save(data, '/Volumes/KINGSTON/Train_DATA_MATHIS/train_dataSubj'
+            torch.save(data, '/Volumes/KINGSTON/Test_DATA_MATHIS/test_dataSubj'
                        + subject + 'run' + run[0] + '.pth')
         except Exception as e:
             print(e)
+            input()
 
 
 if __name__ == "__main__":
